@@ -1,95 +1,50 @@
-import os
-import re
-import base64
-from fastapi import FastAPI
-from pydantic import BaseModel
-import requests
-from bs4 import BeautifulSoup
+from fastapi import FastAPI, Depends, HTTPException, Request, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List
-from urllib.parse import urljoin
+from scraper import Scraper
+from storage import JSONStorage
+from auth import TokenAuth
+from models import Product
+from utils import retry_request
+from notifications import ConsoleNotification
 
 app = FastAPI()
 
+security = HTTPBearer()
+auth = TokenAuth("dummy-secret-token")
 
-class Product(BaseModel):
-    title: str
-    price: float
-    img_path: str
+
+def get_scraper(page_limit: int = Query(..., ge=1)) -> Scraper:
+    base_url = "https://dentalstall.com"
+    image_dir = "images"
+    return Scraper(base_url, page_limit, image_dir)
+
+
+def authenticate(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """ Dependency to validate token authentication """
+    token = credentials.credentials
+    if not auth.validate_token(token):
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 @app.get("/scrape", response_model=List[Product])
-def scrape(page_limit: int):
-    products = []
-    image_dir = "images"
-    if not os.path.exists(image_dir):
-        os.makedirs(image_dir)
+def scrape(
+    scraper: Scraper = Depends(get_scraper),
+    token: HTTPAuthorizationCredentials = Depends(authenticate)
+):
+    # Initialize Notification
+    notifier = ConsoleNotification()
 
-    for page in range(1, page_limit + 1):
-        url = f"https://dentalstall.com/shop/page/{page}"
-        response = requests.get(url)
+    # Perform scraping
+    products = scraper.scrape()
 
-        if response.status_code != 200:
-            break
+    # Save products to JSON storage
+    storage = JSONStorage("products.json")
+    storage.save(products)
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        product_elements = soup.select("li.product")
-
-        for item in product_elements:
-            title_element = item.select_one(".woo-loop-product__title a")
-            img_element = item.select_one("img")
-            price_element = item.select_one(
-                ".price ins .woocommerce-Price-amount")
-
-            title = title_element.text.strip() if title_element else "Unknown"
-            print("Title 45 ", title)
-            if price_element:
-                price = float(price_element.text.strip().replace(
-                    "₹", "").replace(",", ""))
-            else:
-                continue
-
-            # Extract image URL
-            image_path = ""
-            if img_element and "src" in img_element.attrs:
-                img_url = urljoin(url, img_element["src"])
-                # print("Image url", img_url)
-                if img_url.startswith('data:'):
-                    try:
-                        base64_data = img_url.split(',')[1]
-                        image_data = base64.b64decode(
-                            base64_data)
-                        if "svg+xml" in img_url:
-                            file_extension = "svg"
-                        elif "png" in img_url:
-                            file_extension = "png"
-                        else:
-                            file_extension = "jpg"
-
-                        sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title)
-                        image_filename = os.path.join(
-                            image_dir, f"{sanitized_title}.{file_extension}")
-
-                        with open(image_filename, "wb") as img_file:
-                            img_file.write(image_data)
-
-                        image_path = image_filename
-                    except Exception as e:
-                        print(f"Failed to save image for {title}: {e}")
-
-                else:
-                    sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title)
-                    image_filename = os.path.join(
-                        image_dir, f"{sanitized_title}.jpg")
-                    try:
-                        img_data = requests.get(img_url).content
-                        with open(image_filename, "wb") as img_file:
-                            img_file.write(img_data)
-                        image_path = image_filename
-                    except Exception as e:
-                        print(f"Failed to save image for {title}: {e}")
-
-            if title:
-                products.append(
-                    Product(title=title, price=price, img_path=image_path))
+    # Send notification about the scraping process
+    num_products = len(products)
+    notifier.send_message(
+        f"Scraping completed. {num_products} products were scraped and stored.")
 
     return products
