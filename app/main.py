@@ -7,11 +7,12 @@ from auth import TokenAuth
 from models import Product
 from utils import retry_request
 from notifications import ConsoleNotification
+from config import settings
 
 app = FastAPI()
 
 security = HTTPBearer()
-auth = TokenAuth("dummy-secret-token")
+auth = TokenAuth(settings.AUTH_TOKEN)
 
 
 def get_scraper(page_limit: int = Query(..., ge=1)) -> Scraper:

@@ -6,6 +6,8 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from models import Product
 from utils import retry_request
+import redis
+from config import settings
 
 
 class Scraper:
@@ -13,11 +15,11 @@ class Scraper:
         self.base_url = base_url
         self.page_limit = page_limit
         self.image_dir = image_dir
+        self.redis_client = redis.StrictRedis.from_url(
+            settings.REDIS_URL, decode_responses=True)
 
     def scrape(self) -> List[Product]:
         products = []
-
-        # Create image directory if it doesn't exist
         if not os.path.exists(self.image_dir):
             os.makedirs(self.image_dir)
 
@@ -33,8 +35,9 @@ class Scraper:
 
             for item in product_elements:
                 product = self.extract_product_info(item)
-                if product:
+                if product and self.is_new_or_updated(product):
                     products.append(product)
+                    self.cache_product(product)
 
         return products
 
@@ -43,11 +46,11 @@ class Scraper:
         img_element = item.select_one("img")
         price_element = item.select_one(".price ins .woocommerce-Price-amount")
 
-        title = title_element.text.strip() if title_element else "Unknown"
+        title = title_element.text if title_element else "Unknown"
+        print(f"Title ", title)
         price = float(price_element.text.strip().replace(
             "₹", "").replace(",", "")) if price_element else None
 
-        # Extract image URL and save the image
         image_path = self.save_image(img_element, title)
 
         if title and price and image_path:
@@ -62,7 +65,6 @@ class Scraper:
         return ""
 
     def download_image(self, img_url: str, title: str) -> str:
-        # Handling for base64 and regular URLs
         image_path = ""
         if img_url.startswith('data:'):
             image_path = self.handle_data_url(img_url, title)
@@ -74,14 +76,8 @@ class Scraper:
     def handle_data_url(self, img_url: str, title: str) -> str:
         try:
             base64_data = img_url.split(',')[1]
-            image_data = base64.b64decode(
-                base64_data)
-            if "svg+xml" in img_url:
-                file_extension = "svg"
-            elif "png" in img_url:
-                file_extension = "png"
-            else:
-                file_extension = "jpg"
+            image_data = base64.b64decode(base64_data)
+            file_extension = self.get_file_extension(img_url)
 
             sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title)
             image_filename = os.path.join(
@@ -90,7 +86,47 @@ class Scraper:
             with open(image_filename, "wb") as img_file:
                 img_file.write(image_data)
 
-            image_path = image_filename
-            return image_path
+            return image_filename
         except Exception as e:
             print(f"Failed to save image for {title}: {e}")
+            return ""
+
+    def handle_external_url(self, img_url: str, title: str) -> str:
+        try:
+            sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title)
+            file_extension = os.path.splitext(img_url)[1][1:]
+            image_filename = os.path.join(
+                self.image_dir, f"{sanitized_title}.{file_extension}")
+
+            img_data = retry_request(img_url).content
+            with open(image_filename, "wb") as img_file:
+                img_file.write(img_data)
+
+            return image_filename
+        except Exception as e:
+            print(f"Failed to download image for {title}: {e}")
+            return ""
+
+    def get_file_extension(self, img_url: str) -> str:
+        if "svg+xml" in img_url:
+            return "svg"
+        elif "png" in img_url:
+            return "png"
+        return "jpg"
+
+    def is_new_or_updated(self, product: Product) -> bool:
+        """Checks if the product is new or its price has changed."""
+        cached_product = self.redis_client.get(product.title)
+
+        if cached_product:
+            cached_price = float(cached_product)
+            if cached_price != product.price:
+                print(f"Product {product}, cached price {cached_price}")
+        return True
+
+    def cache_product(self, product: Product):
+        """Caches the product data in Redis."""
+        try:
+            self.redis_client.set(product.title, product.price)
+        except Exception as e:
+            print(f"Failed to cache product {product.title}: {e}")
