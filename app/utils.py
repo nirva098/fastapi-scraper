@@ -16,3 +16,10 @@ def retry_request(url: str, retries: int = 3, delay: int = 5) -> Optional[reques
         attempt += 1
         time.sleep(delay)
     return None
+
+
+def parsing_util(content: str, selector: str, parser_type: str):
+    # does some parsing
+    # create the list of dictionaries from the HTML content
+    dummy = [{}]
+    return dummy

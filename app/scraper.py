@@ -5,9 +5,10 @@ from typing import List
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from models import Product
-from utils import retry_request
+from utils import retry_request, parsing_util
 import redis
 from config import settings
+from datetime import datetime
 
 
 class Scraper:
@@ -30,11 +31,26 @@ class Scraper:
             if response is None:
                 break  # Stop if retries fail
 
-            soup = BeautifulSoup(response.text, "html.parser")
-            product_elements = soup.select("li.product")
+            current_time = datetime.now()
+            current_day = datetime.isoweekday(current_time)
 
-            for item in product_elements:
-                product = self.extract_product_info(item)
+            product_elements = []
+            parsed_products = []
+
+            if current_day > 5:
+                # weekend
+                parsed_products = parsing_util(
+                    response.text, "li.product", "html.parser")
+
+            else:
+                # weekday
+                soup = BeautifulSoup(response.text, "html.parser")
+                product_elements = soup.select("li.product")
+                for item in product_elements:
+                    product = self.extract_product_info(item)
+                    parsed_products.append(product)
+
+            for product in parsed_products:
                 if product and self.is_new_or_updated(product):
                     products.append(product)
                     self.cache_product(product)
